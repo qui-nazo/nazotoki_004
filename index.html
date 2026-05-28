@@ -113,7 +113,7 @@ h1 .accent{color:var(--shu)}
 
   <div class="panel">
     <div class="ctrl-row">
-      <div class="ctrl-group">
+      <div class="ctrl-group" id="ctrl-n-toggles">
         <div class="ctrl-label">ピース マス数 (複数可)</div>
         <div class="n-toggles">
           <button class="n-btn" data-n="3">3<span>トロミノ</span></button>
@@ -122,7 +122,7 @@ h1 .accent{color:var(--shu)}
           <button class="n-btn" data-n="6">6<span>ヘキソミノ</span></button>
         </div>
       </div>
-      <div class="ctrl-group">
+      <div class="ctrl-group" id="ctrl-board-select">
         <div class="ctrl-label">盤面サイズ</div>
         <select class="board-select" id="board-select"></select>
       </div>
@@ -131,6 +131,16 @@ h1 .accent{color:var(--shu)}
         <div class="mode-toggle">
           <button class="mode-btn active" data-mode="placement">ピース配置</button>
           <button class="mode-btn" data-mode="division">領域分割</button>
+          <button class="mode-btn" data-mode="free">フリー描画</button>
+        </div>
+      </div>
+      <div class="ctrl-group" id="free-size-ctrl" style="display:none">
+        <div class="ctrl-label">フリー盤面サイズ</div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <input id="free-w" type="number" min="2" max="24" value="10" style="width:52px;font-family:'Shippori Mincho',serif;font-size:14px;font-weight:700;border:1px solid var(--sumi);border-radius:2px;padding:5px 7px;background:var(--paper);color:var(--sumi)">
+          <span style="font-family:'Shippori Mincho',serif;color:var(--ai)">×</span>
+          <input id="free-h" type="number" min="2" max="24" value="10" style="width:52px;font-family:'Shippori Mincho',serif;font-size:14px;font-weight:700;border:1px solid var(--sumi);border-radius:2px;padding:5px 7px;background:var(--paper);color:var(--sumi)">
+          <button class="btn" id="free-apply" style="padding:5px 10px;font-size:12px">適用</button>
         </div>
       </div>
       <div class="ctrl-group" style="margin-left:auto">
@@ -221,6 +231,10 @@ const S = {
   divCurrent: [],    // cells being drawn
   solution: null,    // grid of pieceIdx
   generating: false,
+  // Free-draw mode
+  freeW: 10, freeH: 10,
+  freeGroups: [],    // confirmed regions [{cells:[[r,c]...]}]
+  freeCurrent: [],   // in-progress region cells
 };
 
 // ─── Timer ────────────────────────────────────────────────
@@ -427,47 +441,68 @@ const selBarEl=document.getElementById('sel-bar');
 let CELL=40; // cell pixel size, recalculated each render
 
 function render(){
+  try { _render(); }
+  catch(e) {
+    console.error('render error:', e);
+    const el=document.getElementById('status');
+    if(el) el.innerHTML='<span style="color:var(--shu)">描画エラー: '+e.message+'</span>';
+  }
+}
+function _render(){
   calcCellSize();
   renderBoard();
   renderPieces();
   renderSelBar();
   renderSvgHighlights();
   const isDivision = S.mode==='division';
+  const isFree = S.mode==='free';
   document.getElementById('board-title').textContent = isDivision ? '分 割 盤' : '盤 面';
-  document.getElementById('tray-title').textContent = isDivision ? 'ピース見本' : 'ピース一覧 (向き固定)';
-  document.getElementById('tray-hint').innerHTML = isDivision
-    ? '盤面をドラッグして同じ形の領域に分割'
-    : 'ピースをタップ → 盤面のマスをタップで配置';
+  if(!isFree){
+    document.getElementById('tray-title').textContent = isDivision ? 'ピース見本' : 'ピース一覧 (向き固定)';
+    document.getElementById('tray-hint').innerHTML = isDivision
+      ? '盤面をドラッグして同じ形の領域に分割'
+      : 'ピースをタップ → 盤面のマスをタップで配置';
+  }
   const nLabel=S.nSizes.length===1?`${S.nSizes[0]}マス`:S.nSizes.join('/')+`マス`;
   let hint='';
   if(isDivision){
     hint=`1領域 ${nLabel} / ドラッグで塗る`;
     if(S.divCurrent.length>0) hint+=` (現在 ${S.divCurrent.length}マス)`;
     if(S.nSizes.length>1&&S.nSizes.includes(S.divCurrent.length)) hint+=' — もう一度タップで確定';
+  } else if(isFree){
+    if(S.freeCurrent.length>0)
+      hint=`${S.freeCurrent.length}マス選択中 — 領域内をタップで確定`;
+    else
+      hint='ドラッグで領域を選択 / 確定した領域をタップで削除';
   } else {
     hint=S.selectedPiece===null?'右のピースをタップで選択':'盤面のマスをタップで配置';
   }
   document.getElementById('board-hint').textContent=hint;
-  // Drag overlay active only in division mode when there's a puzzle
-  dragOverlay.style.pointerEvents=(isDivision&&S.solution)?'all':'none';
+  dragOverlay.style.pointerEvents=(isDivision&&S.solution)||isFree?'all':'none';
+  document.getElementById('tray').style.display=isFree?'none':'';
+  document.querySelector('.timer-bar').style.display=isFree?'none':'';
 }
 
 function calcCellSize(){
-  const maxW=Math.min(window.innerWidth-40, 480);
-  const maxH=420;
-  CELL=Math.max(26,Math.min(58,Math.floor(maxW/S.W),Math.floor(maxH/S.H)));
+  const w = S.mode==='free' ? S.freeW : S.W;
+  const h = S.mode==='free' ? S.freeH : S.H;
+  const maxW=Math.min(window.innerWidth-40, S.mode==='free'?680:480);
+  const maxH=S.mode==='free'?560:420;
+  CELL=Math.max(18,Math.min(58,Math.floor(maxW/w),Math.floor(maxH/h)));
 }
 
 function renderBoard(){
+  const W = S.mode==='free' ? S.freeW : S.W;
+  const H = S.mode==='free' ? S.freeH : S.H;
   boardEl.innerHTML='';
-  boardEl.style.gridTemplateColumns=`repeat(${S.W},${CELL}px)`;
-  boardEl.style.gridTemplateRows=`repeat(${S.H},${CELL}px)`;
-  for(let r=0;r<S.H;r++) for(let c=0;c<S.W;c++){
+  boardEl.style.gridTemplateColumns=`repeat(${W},${CELL}px)`;
+  boardEl.style.gridTemplateRows=`repeat(${H},${CELL}px)`;
+  for(let r=0;r<H;r++) for(let c=0;c<W;c++){
     const cell=document.createElement('div');
     cell.className='cell';
-    cell.style.cssText=`width:${CELL}px;height:${CELL}px;background:var(--paper-deep);`;
+    cell.style.cssText=`width:${CELL}px;height:${CELL}px;background:var(--paper-deep);transition:background .05s;`;
     if(S.mode==='placement'){
-      const v=S.board[r][c];
+      const v=S.board&&S.board[r]?S.board[r][c]:null;
       if(v!==null&&v!==undefined&&S.pieces[v]){
         cell.style.background=S.pieces[v].color;
         const lbl=document.createElement('div');
@@ -481,8 +516,8 @@ function renderBoard(){
   }
   // Size the SVG overlay to match the board including border/padding
   const pad=3,border=2;
-  const totalW=S.W*CELL+pad*2+border*2;
-  const totalH=S.H*CELL+pad*2+border*2;
+  const totalW=W*CELL+pad*2+border*2;
+  const totalH=H*CELL+pad*2+border*2;
   boardSvg.setAttribute('viewBox',`0 0 ${totalW} ${totalH}`);
   boardSvg.style.width=totalW+'px';
   boardSvg.style.height=totalH+'px';
@@ -497,6 +532,34 @@ function cellRect(r,c){
 }
 function renderSvgHighlights(){
   boardSvg.innerHTML='';
+  if(S.mode==='free'){
+    // Confirmed free regions — grey fill + black border
+    const GREY='#888888';
+    S.freeGroups.forEach(g=>{
+      for(const[r,c]of g.cells){
+        const{x,y,w,h}=cellRect(r,c);
+        const rect=document.createElementNS('http://www.w3.org/2000/svg','rect');
+        rect.setAttribute('x',x);rect.setAttribute('y',y);
+        rect.setAttribute('width',w);rect.setAttribute('height',h);
+        rect.setAttribute('fill',GREY);rect.setAttribute('opacity','0.72');
+        boardSvg.appendChild(rect);
+      }
+      drawGroupBorder(g.cells,'#1a1a1f',1,2.5);
+    });
+    // In-progress region — light grey preview
+    if(S.freeCurrent.length>0){
+      for(const[r,c]of S.freeCurrent){
+        const{x,y,w,h}=cellRect(r,c);
+        const rect=document.createElementNS('http://www.w3.org/2000/svg','rect');
+        rect.setAttribute('x',x);rect.setAttribute('y',y);
+        rect.setAttribute('width',w);rect.setAttribute('height',h);
+        rect.setAttribute('fill',GREY);rect.setAttribute('opacity','0.35');
+        boardSvg.appendChild(rect);
+      }
+      drawGroupBorder(S.freeCurrent,'#1a1a1f',0.5,2);
+    }
+    return;
+  }
   if(S.mode!=='division') return;
   // Confirmed groups
   S.divGroups.forEach((g,i)=>{
@@ -533,7 +596,7 @@ function renderSvgHighlights(){
     drawGroupBorder(S.divCurrent, col, 0.7);
   }
 }
-function drawGroupBorder(cells, col, opacity=1){
+function drawGroupBorder(cells, col, opacity=1, strokeWidth=2.5){
   const cellSet=new Set(cells.map(([r,c])=>`${r},${c}`));
   for(const[r,c]of cells){
     const{x,y,w,h}=cellRect(r,c);
@@ -543,7 +606,7 @@ function drawGroupBorder(cells, col, opacity=1){
         const line=document.createElementNS('http://www.w3.org/2000/svg','line');
         line.setAttribute('x1',x1);line.setAttribute('y1',y1);
         line.setAttribute('x2',x2);line.setAttribute('y2',y2);
-        line.setAttribute('stroke',col);line.setAttribute('stroke-width','2.5');
+        line.setAttribute('stroke',col);line.setAttribute('stroke-width',strokeWidth);
         line.setAttribute('opacity',opacity);
         boardSvg.appendChild(line);
       }
@@ -606,10 +669,11 @@ function renderPieces(){
 }
 
 function renderSelBar(){
-  if(S.mode==='division'){selBarEl.style.display='none';return;}
+  if(S.mode==='division'||S.mode==='free'){selBarEl.style.display='none';return;}
   selBarEl.style.display='';
   if(S.selectedPiece===null){selBarEl.className='sel-bar empty';selBarEl.textContent='ピースを選んでください';return;}
   const piece=S.pieces[S.selectedPiece];
+  if(!piece){selBarEl.className='sel-bar empty';selBarEl.textContent='ピースを選んでください';return;}
   selBarEl.className='sel-bar';
   selBarEl.innerHTML=`<span style="display:inline-block;width:13px;height:13px;background:${piece.color};border:1px solid rgba(255,255,255,.3)"></span>選択中: ピース #${S.selectedPiece+1}`;
 }
@@ -696,21 +760,51 @@ function getBoardOffset(){
   return rect; // top,left of outer div
 }
 function coordToCell(clientX, clientY){
+  const W = S.mode==='free' ? S.freeW : S.W;
+  const H = S.mode==='free' ? S.freeH : S.H;
   const rect=getBoardOffset();
   const pad=3,border=2,off=pad+border;
   const lx=clientX-rect.left-off, ly=clientY-rect.top-off;
   const c=Math.floor(lx/CELL), r=Math.floor(ly/CELL);
-  if(r<0||r>=S.H||c<0||c>=S.W) return null;
+  if(r<0||r>=H||c<0||c>=W) return null;
   return [r,c];
 }
 
 let lastDivCell=null;
 
 function divStart(clientX, clientY){
-  if(!S.solution) return;
   const cell=coordToCell(clientX,clientY);
   if(!cell) return;
   const[r,c]=cell; lastDivCell=cell;
+
+  // ── Free-draw mode ──
+  if(S.mode==='free'){
+    const k=`${r},${c}`;
+    // Tap on confirmed region → remove it
+    for(let i=S.freeGroups.length-1;i>=0;i--){
+      if(S.freeGroups[i].cells.some(([rr,cc])=>rr===r&&cc===c)){
+        S.freeGroups.splice(i,1); S.freeCurrent=[];
+        renderSvgHighlights(); return;
+      }
+    }
+    // Tap on in-progress cell → confirm region
+    if(S.freeCurrent.some(([rr,cc])=>rr===r&&cc===c)){
+      if(S.freeCurrent.length>0){
+        S.freeGroups.push({cells:S.freeCurrent}); S.freeCurrent=[];
+        renderSvgHighlights();
+        document.getElementById('board-hint').textContent='ドラッグで次の領域を描いてください';
+      }
+      return;
+    }
+    // Start new region
+    S.freeCurrent=[[r,c]];
+    renderSvgHighlights();
+    render();
+    return;
+  }
+
+  // ── Division mode ──
+  if(!S.solution) return;
   // Tap on confirmed group -> remove it
   for(let i=S.divGroups.length-1;i>=0;i--){
     if(S.divGroups[i].cells.some(([rr,cc])=>rr===r&&cc===c)){
@@ -734,12 +828,28 @@ function divStart(clientX, clientY){
 }
 
 function divMove(clientX, clientY){
-  if(!S.solution) return;
   const cell=coordToCell(clientX,clientY);
   if(!cell) return;
   const[r,c]=cell;
   if(lastDivCell&&lastDivCell[0]===r&&lastDivCell[1]===c) return;
   lastDivCell=cell;
+
+  // ── Free-draw mode ──
+  if(S.mode==='free'){
+    // Already in confirmed group → skip
+    for(const g of S.freeGroups) if(g.cells.some(([rr,cc])=>rr===r&&cc===c)) return;
+    if(S.freeCurrent.some(([rr,cc])=>rr===r&&cc===c)) return;
+    // Must be adjacent to current region
+    if(S.freeCurrent.length>0&&!S.freeCurrent.some(([rr,cc])=>Math.abs(rr-r)+Math.abs(cc-c)===1)) return;
+    if(S.freeCurrent.length===0) S.freeCurrent=[[r,c]];
+    else S.freeCurrent.push([r,c]);
+    renderSvgHighlights();
+    document.getElementById('board-hint').textContent=`${S.freeCurrent.length}マス選択中 — 領域内をタップで確定`;
+    return;
+  }
+
+  // ── Division mode ──
+  if(!S.solution) return;
   // Skip if in a confirmed group
   for(const g of S.divGroups) if(g.cells.some(([rr,cc])=>rr===r&&cc===c)) return;
   if(S.divCurrent.some(([rr,cc])=>rr===r&&cc===c)) return;
@@ -836,15 +946,43 @@ document.querySelectorAll('.mode-btn').forEach(btn=>{
   btn.addEventListener('click',()=>{
     S.mode=btn.dataset.mode;
     S.placements={}; S.divGroups=[]; S.divCurrent=[]; S.selectedPiece=null;
-    if(S.solution) S.board=Array.from({length:S.H},()=>Array(S.W).fill(null));
+    S.board=Array.from({length:S.H},()=>Array(S.W).fill(null));
     document.querySelectorAll('.mode-btn').forEach(b=>b.classList.toggle('active',b.dataset.mode===S.mode));
+    // Show/hide puzzle controls vs free controls
+    const isFree=S.mode==='free';
+    document.getElementById('free-size-ctrl').style.display=isFree?'':'none';
+    document.getElementById('ctrl-board-select').style.display=isFree?'none':'';
+    document.getElementById('ctrl-n-toggles').style.display=isFree?'none':'';
+    document.getElementById('generate').style.display=isFree?'none':'';
+    if(isFree){
+      timerReset();
+      S.freeGroups=[]; S.freeCurrent=[];
+    }
     render();
-    if(S.solution) setStatus(S.mode==='placement'?'ピースを配置してください。':'盤面をドラッグして分割してください。','');
+    if(!isFree&&S.solution) setStatus(S.mode==='placement'?'ピースを配置してください。':'盤面をドラッグして分割してください。','');
+    if(isFree) setStatus('ドラッグで自由にポリオミノを描いてください。','');
   });
+});
+
+// Free-draw size apply
+document.getElementById('free-apply').addEventListener('click',()=>{
+  const w=Math.max(2,Math.min(24,parseInt(document.getElementById('free-w').value)||10));
+  const h=Math.max(2,Math.min(24,parseInt(document.getElementById('free-h').value)||10));
+  S.freeW=w; S.freeH=h;
+  S.freeGroups=[]; S.freeCurrent=[];
+  document.getElementById('free-w').value=w;
+  document.getElementById('free-h').value=h;
+  render();
 });
 
 document.getElementById('generate').addEventListener('click',()=>generatePuzzle());
 document.getElementById('reset').addEventListener('click',()=>{
+  if(S.mode==='free'){
+    S.freeGroups=[]; S.freeCurrent=[];
+    renderSvgHighlights();
+    setStatus('クリアしました。','');
+    return;
+  }
   if(!S.solution) return;
   S.placements={}; S.divGroups=[]; S.divCurrent=[]; S.selectedPiece=null;
   S.board=Array.from({length:S.H},()=>Array(S.W).fill(null));
@@ -858,6 +996,7 @@ window.addEventListener('resize',()=>{if(S.pieces.length) render();});
 
 // ─── Init ─────────────────────────────────────────────────
 buildBoardOptions();
+S.board=Array.from({length:S.H},()=>Array(S.W).fill(null));
 render();
 </script>
 </body>
